@@ -3,6 +3,9 @@
 A tool to securely transfer ERC-20 tokens and ERC-721 NFTs from compromised wallets using Flashbots. Works only on the Ethereum Network, preventing frontrunning and ensuring safe asset recovery.
 
 ## 📚 Features
+- **Support both network** :
+  - Sepolia Testnet (To test or understand how this actually works)
+  - Ethereum Mainnet
 - **Supports Asset Recovery**:  
   - 💰 ERC-20 Token Transfers  
   - 🖼️ ERC-721 NFT Transfers  
@@ -28,7 +31,7 @@ rm -rf asset-recovery-tool && git clone https://github.com/zunxbt/asset-recovery
 ```
 3. **Install dependencies**
 ```bash
-npm install @flashbots/ethers-provider-bundle@^0.6.2 dotenv@^16.4.7 ethers@^5.7.2
+npm install @flashbots/ethers-provider-bundle@0.6.2 dotenv@16.4.7 ethers@5.7.2
 ```
 ## ⚙️ Configuration
 - Modify `.env` file with proper private key using the below command
