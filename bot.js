@@ -5,6 +5,7 @@ require("dotenv").config();
 
 const colors = {
   reset: "\x1b[0m",
+  bold: "\x1b[1m",
   cyan: "\x1b[36m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
@@ -13,14 +14,21 @@ const colors = {
   blue: "\x1b[34m"
 };
 
-const CHAIN_ID = 1;
-const RPC_URL = "https://ethereum.publicnode.com";
-const FLASHBOTS_ENDPOINT = "https://rpc.titanbuilder.xyz";
 
-const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
-const sponsorWallet = new ethers.Wallet(process.env.PRIVATE_KEY_SPONSOR, provider);
-const hackedWallet = new ethers.Wallet(process.env.PRIVATE_KEY_HACKED, provider);
-const safeWalletAddress = process.env.SAFE_WALLET_ADDRESS;
+const NETWORKS = {
+  Mainnet: {
+    chainId: 1,
+    rpc: "https://ethereum.publicnode.com",
+    flashbots: "https://relay.flashbots.net",
+    explorer: "https://etherscan.io/address/"
+  },
+  Testnet: {
+    chainId: 11155111,
+    rpc: "https://1rpc.io/sepolia",
+    flashbots: "https://relay-sepolia.flashbots.net",
+    explorer: "https://sepolia.etherscan.io/address/"
+  }
+};
 
 const erc20ABI = [
   "function transfer(address to, uint256 amount) external returns (bool)",
@@ -42,6 +50,15 @@ const rl = readline.createInterface({
 let assetType;
 let contract;
 let tokenIds;
+let selectedNetwork;
+let provider;
+let flashbotsProvider;
+let sponsorWallet;
+let hackedWallet;
+let safeWalletAddress;
+let currentGasFee;
+let gasFeeBoost = 3;
+const MAX_ATTEMPTS = 30;  // You can increase or decrease your attempts
 
 function colorLog(color, message) {
   console.log(`${color}%s${colors.reset}`, message);
@@ -50,47 +67,85 @@ function colorLog(color, message) {
 function showHeader() {
   colorLog(colors.blue, "┌──────────────────────────────────────────────────┐");
   colorLog(colors.blue, "│             CRYPTO ASSETS RESCUE TOOL            │");
-  colorLog(colors.blue, "│                 Made by @Zun2025                 │");
+  colorLog(colors.blue, "│               Created by @Zun2025                │");
   colorLog(colors.blue, "└──────────────────────────────────────────────────┘");
 }
 
 async function getUserInput() {
   return new Promise((resolve) => {
-    rl.question(`${colors.cyan}Choose asset type\n${colors.reset}` +
-      `${colors.yellow}1.  Tokens (ERC20)\n${colors.green}2.  NFTs (ERC721)\n${colors.cyan}➤ `, (answer) => {
-      if (answer === "1") {
-        rl.question(`${colors.cyan}Enter ERC20 contract address: ${colors.reset}`, (contractAddress) => {
-          resolve({ type: "ERC20", contractAddress });
-          rl.close();
-        });
-      } else if (answer === "2") {
-        rl.question(`${colors.cyan}🖼️  Enter ERC721 contract address: ${colors.reset}`, (contractAddress) => {
-          rl.question(`${colors.cyan}🔢 Enter token IDs to transfer (comma-separated): ${colors.reset}`, (tokenIdsInput) => {
-            const tokenIdArray = tokenIdsInput.split(",").map(id => id.trim());
-            resolve({ type: "ERC721", contractAddress, tokenIds: tokenIdArray });
+    rl.question(`${colors.cyan}${colors.bold}🛜  Choose network ${colors.reset}` +
+      `${colors.yellow} \n1) Ethereum Mainnet${colors.green} \n2) Sepolia Testnet\n${colors.cyan}👉 Your Response : `, (networkAnswer) => {    
+      
+      selectedNetwork = networkAnswer === "1" ? "Mainnet" : "Testnet";
+      
+      rl.question(`${colors.cyan}${colors.bold}\n🪙  Choose asset type${colors.reset}\n` +
+        `${colors.yellow}1. Tokens (ERC20)\n${colors.green}2. NFTs (ERC721)\n${colors.cyan}👉 Your Response : `, (answer) => {      
+        if (answer === "1") {
+          rl.question(`${colors.cyan}\n📒 Enter ERC20 token contract address : ${colors.reset}`, (contractAddress) => {
+            resolve({ 
+              network: selectedNetwork,
+              type: "ERC20", 
+              contractAddress 
+            });
             rl.close();
           });
-        });
-      } else {
-        colorLog(colors.red, "❌ Invalid choice. Please enter 1 or 2");
-        resolve(getUserInput());
-      }
+        } else if (answer === "2") {
+          rl.question(`${colors.cyan}\n📝 Enter ERC721 Token (NFTs) contract address : ${colors.reset}`, (contractAddress) => {
+            rl.question(`${colors.cyan}📄 Enter token IDs to transfer (comma-separated): ${colors.reset}`, (tokenIdsInput) => {
+              const tokenIdArray = tokenIdsInput.split(",").map(id => id.trim());
+              resolve({ 
+                network: selectedNetwork,
+                type: "ERC721", 
+                contractAddress, 
+                tokenIds: tokenIdArray 
+              });
+              rl.close();
+            });
+          });
+        } else {
+          colorLog(colors.red, "❌ Invalid choice. Please enter 1 or 2");
+          resolve(getUserInput());
+        }
+      });
     });
   });
 }
 
+async function setupWallets() {
+  provider = new ethers.providers.JsonRpcProvider(NETWORKS[selectedNetwork].rpc);
+  sponsorWallet = new ethers.Wallet(process.env.PRIVATE_KEY_SPONSOR, provider);
+  hackedWallet = new ethers.Wallet(process.env.PRIVATE_KEY_HACKED, provider);
+  safeWalletAddress = process.env.SAFE_WALLET_ADDRESS;
+  
+  const feeData = await provider.getFeeData();
+  currentGasFee = feeData.maxPriorityFeePerGas || ethers.utils.parseUnits("2", "gwei");
+  const currentGasGwei = parseFloat(ethers.utils.formatUnits(currentGasFee, "gwei"));
+  
+  colorLog(colors.yellow, `⛽ Current gas price: ${currentGasGwei.toFixed(2)} GWEI`);
+  colorLog(colors.yellow, `⛽ Initial gas boost: +${gasFeeBoost} GWEI`);
+  
+  const authSigner = sponsorWallet;
+  flashbotsProvider = await FlashbotsBundleProvider.create(
+    provider,
+    authSigner,
+    NETWORKS[selectedNetwork].flashbots
+  );
+}
+
+
 async function prepareTransferTxs() {
   if (assetType === "ERC20") {
-    colorLog(colors.magenta, "⚖️  Checking ERC20 balance...");
     const balance = await contract.balanceOf(hackedWallet.address);
     if (balance.isZero()) {
       colorLog(colors.yellow, "💤 Wallet has zero token balance");
       return { txs: [], info: null };
     }
+    
     const symbol = await contract.symbol();
     const decimals = await contract.decimals();
     const formattedBalance = ethers.utils.formatUnits(balance, decimals);
-    colorLog(colors.green, `💰 Discovered balance: ${formattedBalance} ${symbol}`);
+    colorLog(colors.green, `💰 Discovered balance: ${formattedBalance} ${symbol}\n`);
+    
     const data = contract.interface.encodeFunctionData("transfer", [safeWalletAddress, balance]);
     const tx = { to: contract.address, data };
     const info = { type: "ERC20", amount: balance, symbol, decimals };
@@ -100,8 +155,9 @@ async function prepareTransferTxs() {
       colorLog(colors.red, "🚫 No token IDs provided");
       return { txs: [], info: null };
     }
-    colorLog(colors.cyan, `🖼️  Preparing to transfer ${tokenIds.length} NFTs:`);
-    tokenIds.forEach((id) => colorLog(colors.yellow, ` ▸ Token ID #${id}`));
+    
+    colorLog(colors.cyan, `🖼️  Preparing to transfer ${tokenIds.length} NFTs`);
+    
     const txs = [];
     for (const tokenId of tokenIds) {
       const data = contract.interface.encodeFunctionData("transferFrom", [
@@ -111,87 +167,137 @@ async function prepareTransferTxs() {
       ]);
       txs.push({ to: contract.address, data });
     }
+    
     const info = { type: "ERC721", tokenIds };
     return { txs, info };
   }
+  
   return { txs: [], info: null };
 }
 
-async function executeSafeTransfer() {
+async function simulateInitialBundle(transferTxs) {
+  colorLog(colors.blue, "\n🔄 Running initial bundle simulation...");
+  
   try {
-    showHeader();
-    colorLog(colors.green, "\n🔐 Initializing Flashbots rescue module...");
-
-    const authSigner = sponsorWallet;
-    const flashbotsProvider = await FlashbotsBundleProvider.create(
-      provider,
-      authSigner,
-      FLASHBOTS_ENDPOINT
+    const gasEstimates = await Promise.all(
+      transferTxs.map(tx =>
+        provider.estimateGas({
+          to: tx.to,
+          data: tx.data,
+          from: hackedWallet.address
+        })
+      )
     );
 
-    let priorityFeeBoost = 0;
-    let totalAttempts = 0;
-    const maxAttempts = 30;
+    const totalGasLimit = gasEstimates.reduce(
+      (sum, gas) => sum.add(gas), 
+      ethers.BigNumber.from(0)
+    );
+    
+    const baseGasPrice = ethers.utils.parseUnits(
+      (parseFloat(ethers.utils.formatUnits(currentGasFee, "gwei")) + gasFeeBoost).toString(), 
+      "gwei"
+    );
+    
+    const ethNeeded = totalGasLimit.mul(baseGasPrice);
+    
+    const sponsorTx = {
+      chainId: NETWORKS[selectedNetwork].chainId,
+      to: hackedWallet.address,
+      value: ethNeeded,
+      type: 2,
+      maxFeePerGas: baseGasPrice,
+      maxPriorityFeePerGas: baseGasPrice,
+      gasLimit: 21000,
+      nonce: await provider.getTransactionCount(sponsorWallet.address)
+    };
+    
+    const signedSponsorTx = await sponsorWallet.signTransaction(sponsorTx);
+    
+    const hackedNonce = await provider.getTransactionCount(hackedWallet.address);
+    const signedTransferTxs = [];
+    
+    for (let i = 0; i < transferTxs.length; i++) {
+      const tx = transferTxs[i];
+      const transferTx = {
+        chainId: NETWORKS[selectedNetwork].chainId,
+        to: tx.to,
+        data: tx.data,
+        type: 2,
+        maxFeePerGas: baseGasPrice,
+        maxPriorityFeePerGas: baseGasPrice,
+        gasLimit: gasEstimates[i],
+        nonce: hackedNonce + i
+      };
+      
+      const signedTx = await hackedWallet.signTransaction(transferTx);
+      signedTransferTxs.push(signedTx);
+    }
+    
+    const simulationBundle = [signedSponsorTx, ...signedTransferTxs];
+    const targetBlock = await provider.getBlockNumber() + 1;
+    const simulation = await flashbotsProvider.simulate(
+      simulationBundle, 
+      `0x${targetBlock.toString(16)}`, 
+      "latest"
+    );
+    
+    if (simulation.firstRevert) {
+      colorLog(colors.red, `💣 Simulation failed: ${simulation.firstRevert.error}`);
+      return { success: false, error: simulation.firstRevert.error };
+    }
+    
+    colorLog(colors.green, "✅ Initial simulation successful");
+    return { 
+      success: true, 
+      gasEstimates, 
+      totalGasLimit,
+      baseGasPrice,
+      ethNeeded 
+    };
+  } catch (error) {
+    colorLog(colors.red, `💣 Simulation error: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+}
 
-    colorLog(colors.blue, "\n📡 Listening for new blocks...");
-    colorLog(colors.yellow, "⚠️  Press CTRL+C to abort the operation\n");
 
+async function sendBundle(transferTxs, transferInfo, simulation) {
+  const gasEstimates = simulation.gasEstimates;
+  const totalGasLimit = simulation.totalGasLimit;
+  
+  try {
+    colorLog(colors.blue, "\n🚀 Starting bundle submission...");
+    let isRescueComplete = false;
+    let currentRetryCount = 0;
+    let successBlock = null;
+    
     provider.on("block", async (blockNumber) => {
-      totalAttempts++;
-      if (totalAttempts >= maxAttempts) {
-        colorLog(colors.red, `\n⛔ Maximum attempts (${maxAttempts}) reached. Shutting down...`);
-        process.exit(1);
-      }
-
+      if (isRescueComplete) return;
+      
       try {
-        const currentBlock = blockNumber + 1;
-        const targetBlockHex = `0x${currentBlock.toString(16)}`;
-        const feeData = await provider.getFeeData();
-
-        const baseMaxPriorityFee = feeData.maxPriorityFeePerGas || ethers.utils.parseUnits("1", "gwei");
-        const baseMaxFeePerGas = feeData.maxFeePerGas || ethers.utils.parseUnits("2", "gwei");
-        const maxPriorityFeePerGas = baseMaxPriorityFee.add(
-          ethers.utils.parseUnits(priorityFeeBoost.toString(), "gwei")
-        );
-        const maxFeePerGas = baseMaxFeePerGas.add(
-          ethers.utils.parseUnits(priorityFeeBoost.toString(), "gwei")
-        );
-
-        colorLog(colors.magenta, `\n═══════════════════════════════════════════════════`);
-        colorLog(colors.cyan, `🌀 Attempt #${totalAttempts} | Target Block: ${currentBlock}`);
-        colorLog(colors.yellow, `⛽ Max Fee: ${ethers.utils.formatUnits(maxFeePerGas, "gwei")} Gwei | Boost: +${priorityFeeBoost} Gwei`);
-
-        colorLog(colors.blue, "\n🔍 Scanning for assets...");
-        const { txs: transferTxs, info: transferInfo } = await prepareTransferTxs();
-        if (transferTxs.length === 0) {
-          colorLog(colors.yellow, "💤 No transferable assets found. Skipping block...");
-          return;
+        currentRetryCount++;
+        
+        if (currentRetryCount > MAX_ATTEMPTS) {
+          colorLog(colors.red, `\n⚠️ Maximum attempts (${MAX_ATTEMPTS}) reached. Consider increasing gas price or try again later.`);
+          process.exit(1);
         }
-        colorLog(colors.green, `📦 Prepared ${transferTxs.length} transactions for bundling`);
-
-        colorLog(colors.blue, "\n🧮 Calculating gas requirements...");
-        const gasEstimates = await Promise.all(
-          transferTxs.map(tx =>
-            provider.estimateGas({
-              to: tx.to,
-              data: tx.data,
-              from: hackedWallet.address
-            })
-          )
-        );
-
-        const totalGasLimit = gasEstimates.reduce((sum, gas) => sum.add(gas), ethers.BigNumber.from(0));
+        
+        const gasBoostForThisAttempt = gasFeeBoost + Math.floor(currentRetryCount / 2);
+        const gasGwei = parseFloat(ethers.utils.formatUnits(currentGasFee, "gwei")) + gasBoostForThisAttempt;
+        const maxFeePerGas = ethers.utils.parseUnits(gasGwei.toString(), "gwei");
+        const maxPriorityFeePerGas = maxFeePerGas;
+        
+        const targetBlock = blockNumber + 1;
+        
+        colorLog(colors.cyan, `Sending bundle in ${targetBlock} block at ${gasGwei.toFixed(1)} gwei (attempt ${currentRetryCount}/${MAX_ATTEMPTS})`);
+        
+        const sponsorNonce = await provider.getTransactionCount(sponsorWallet.address, "pending");
+        const hackedNonce = await provider.getTransactionCount(hackedWallet.address, "pending");
+        
         const ethNeeded = totalGasLimit.mul(maxFeePerGas);
-        colorLog(colors.cyan, `⛽ Total Gas: ${totalGasLimit.toString()} | 💰 ETH Required: ${ethers.utils.formatEther(ethNeeded)}`);
-
-        const [sponsorNonce, hackedNonce] = await Promise.all([
-          provider.getTransactionCount(sponsorWallet.address, "pending"),
-          provider.getTransactionCount(hackedWallet.address, "pending")
-        ]);
-
-        colorLog(colors.blue, "\n🔏 Signing transactions...");
         const sponsorTx = {
-          chainId: CHAIN_ID,
+          chainId: NETWORKS[selectedNetwork].chainId,
           to: hackedWallet.address,
           value: ethNeeded,
           type: 2,
@@ -200,106 +306,123 @@ async function executeSafeTransfer() {
           gasLimit: 21000,
           nonce: sponsorNonce
         };
+        
         const signedSponsorTx = await sponsorWallet.signTransaction(sponsorTx);
-
+        
         const signedTransferTxs = [];
         for (let i = 0; i < transferTxs.length; i++) {
           const tx = transferTxs[i];
-          const gasLimit = gasEstimates[i];
           const transferTx = {
-            chainId: CHAIN_ID,
+            chainId: NETWORKS[selectedNetwork].chainId,
             to: tx.to,
             data: tx.data,
             type: 2,
             maxFeePerGas,
             maxPriorityFeePerGas,
-            gasLimit,
+            gasLimit: gasEstimates[i],
             nonce: hackedNonce + i
           };
+          
           const signedTx = await hackedWallet.signTransaction(transferTx);
           signedTransferTxs.push(signedTx);
         }
-        colorLog(colors.green, `✅ Successfully signed ${signedTransferTxs.length + 1} transactions`);
-
-        const simulationBundle = [signedSponsorTx, ...signedTransferTxs];
-
-        colorLog(colors.blue, "\n🔄 Running bundle simulation...");
-        try {
-          const simulation = await flashbotsProvider.simulate(simulationBundle, targetBlockHex, "latest");
-          if (simulation.firstRevert) {
-            colorLog(colors.red, `💣 Simulation failed: Transaction reverted - ${simulation.firstRevert.error}`);
-            priorityFeeBoost += 1;
-            colorLog(colors.yellow, `📈 Boosting priority fee to +${priorityFeeBoost} Gwei`);
-            return;
-          }
-          colorLog(colors.green, "✅ Simulation successful");
-        } catch (simError) {
-          colorLog(colors.red, `💣 Simulation error: ${simError.message}`);
-          priorityFeeBoost += 1;
-          colorLog(colors.yellow, `📈 Boosting priority fee to +${priorityFeeBoost} Gwei`);
-          return;
-        }
-
-        colorLog(colors.blue, "\n🚀 Launching bundle...");
-        const sendBundle = [
+        
+        const bundle = [
           { signedTransaction: signedSponsorTx },
-          ...signedTransferTxs.map(signedTx => ({ signedTransaction: signedTx }))
+          ...signedTransferTxs.map(tx => ({ signedTransaction: tx }))
         ];
-
-        const bundleResponse = await flashbotsProvider.sendBundle(sendBundle, currentBlock);
-        const resolution = await bundleResponse.wait();
-
-        let statusMessage;
-        let statusColor;
-        if (resolution === FlashbotsBundleResolution.BundleIncluded) {
-          statusMessage = "✅ Bundle Included";
-          statusColor = colors.green;
-        } else if (resolution === FlashbotsBundleResolution.BlockPassedWithoutInclusion) {
-          statusMessage = "❌ Bundle Not Included";
-          statusColor = colors.red;
-        } else {
-          statusMessage = `⚠️ Bundle Status: ${FlashbotsBundleResolution[resolution]}`;
-          statusColor = colors.yellow;
-        }
-        colorLog(statusColor, statusMessage);
-
-        if (resolution === FlashbotsBundleResolution.BundleIncluded) {
-          if (transferInfo.type === "ERC20") {
-            const formattedAmount = ethers.utils.formatUnits(transferInfo.amount, transferInfo.decimals);
-            colorLog(colors.green, `\n🎉🎉🎉 CONGRATS! You have successfully recovered ${formattedAmount} ${transferInfo.symbol} 🎉🎉🎉`);
-          } else if (transferInfo.type === "ERC721") {
-            colorLog(colors.green, `\n🎉🎉🎉 CONGRATS! You have successfully recovered ${transferInfo.tokenIds.length} NFTs 🎉🎉🎉`);
+        
+        const bundleResponse = await flashbotsProvider.sendBundle(bundle, targetBlock);
+        
+        bundleResponse.wait().then(resolution => {
+          if (resolution === FlashbotsBundleResolution.BundleIncluded) {
+            successBlock = targetBlock;
+            isRescueComplete = true;
+            
+            if (transferInfo.type === "ERC20") {
+              const formattedAmount = ethers.utils.formatUnits(transferInfo.amount, transferInfo.decimals);
+              colorLog(colors.green, `\n✅ You have successfully recovered ${formattedAmount} ${transferInfo.symbol} in ${successBlock} block`);
+            } else if (transferInfo.type === "ERC721") {
+              colorLog(colors.green, `\n✅ You have successfully recovered ${transferInfo.tokenIds.length} NFTs in ${successBlock} block`);
+            }
+            
+            colorLog(colors.green, `🔗 Check it out on explorer : ${NETWORKS[selectedNetwork].explorer}${hackedWallet.address}\n`);
+            
+            process.exit(0);
           }
-          colorLog(colors.green, `🔗 Block Number: ${currentBlock}`);
-          process.exit(0);
-        } else {
-          colorLog(colors.yellow, "\n⏳ Bundle not yet included. Retrying...");
-          priorityFeeBoost += 1;
-        }
+        });
       } catch (blockError) {
-        colorLog(colors.red, `\n⚠️ Error in block processing: ${blockError.message}`);
-        priorityFeeBoost += 1;
+        colorLog(colors.red, `Error in block processing: ${blockError.message}`);
       }
     });
-  } catch (mainError) {
-    colorLog(colors.red, `\n💀 FATAL ERROR: ${mainError.message}`);
+  } catch (error) {
+    colorLog(colors.red, `Error in bundle sending: ${error.message}`);
     process.exit(1);
   }
 }
 
+
+async function executeSafeTransfer() {
+  try {
+    showHeader();
+    
+    colorLog(colors.green, "\n🔐 Initializing Flashbots rescue module...");
+    await setupWallets();
+    
+    colorLog(colors.blue, "\n🔍 Scanning for assets...");
+    const { txs: transferTxs, info: transferInfo } = await prepareTransferTxs();
+    
+    if (transferTxs.length === 0) {
+      colorLog(colors.yellow, "💤 No transferable assets found. Exiting...");
+      process.exit(0);
+    }
+    
+    const simulation = await simulateInitialBundle(transferTxs);
+    if (!simulation.success) {
+      colorLog(colors.red, "💣 Initial simulation failed. Exiting...");
+      process.exit(1);
+    }
+    
+    colorLog(colors.blue, "\n📡 Starting rescue operation...");
+    colorLog(colors.yellow, "⚠️  Press CTRL+C to abort the operation\n");
+    
+    await sendBundle(transferTxs, transferInfo, simulation);
+    
+  } catch (error) {
+    colorLog(colors.red, `\n💀 FATAL ERROR: ${error.message}\n`);
+    process.exit(1);
+  }
+}
+
+
 (async () => {
   try {
     const userInput = await getUserInput();
+    selectedNetwork = userInput.network;
     assetType = userInput.type;
+    
+    provider = new ethers.providers.JsonRpcProvider(NETWORKS[selectedNetwork].rpc);
+    
     if (assetType === "ERC20") {
+      const code = await provider.getCode(userInput.contractAddress);
+      if (code === '0x') {
+        colorLog(colors.red, "\n❌ The provided address is not a contract address.\n");
+        process.exit(1);
+      }
       contract = new ethers.Contract(userInput.contractAddress, erc20ABI, provider);
     } else if (assetType === "ERC721") {
+      const code = await provider.getCode(userInput.contractAddress);
+      if (code === '0x') {
+        colorLog(colors.red, "\n❌ The provided address is not a contract address.\n");
+        process.exit(1);
+      }
       contract = new ethers.Contract(userInput.contractAddress, erc721ABI, provider);
       tokenIds = userInput.tokenIds;
     }
+    
     await executeSafeTransfer();
   } catch (error) {
-    colorLog(colors.red, `\n🔥 INITIALIZATION FAILED: ${error.message}`);
+    colorLog(colors.red, `\n🔥 INITIALIZATION FAILED: ${error.message}\n`);
     process.exit(1);
   }
 })();
